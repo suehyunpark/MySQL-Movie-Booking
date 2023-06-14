@@ -4,36 +4,71 @@ from contextlib import contextmanager
 import mysql.connector.errors as errors
 import numpy as np
 from mysql.connector import Error, connect, errorcode
+from time import sleep
 
 from messages import *
-from schema import DB_NAME, DEFAULT_DATA, TABLES
+from schema import DB_NAME, TABLES
 from sql_queries import *
 from utils import *
 
+DEFAULT_DATA = "data.csv"
+NUM_TRIES = 3
 
-class MovieBookingAgent:
+class SQLConnector:
     def __init__(self):
-        pass
-    
-    @contextmanager
-    def _connection(self):
-        connection = connect(
+        for _ in range(NUM_TRIES):
+            try:
+                self._connect()
+            except:
+                sleep(3)
+                continue
+            else:
+                break
+
+
+    def _connect(self):
+        self.connection = connect(
             host="astronaut.snu.ac.kr",
             port=7000,
             user=DB_NAME,
             password=DB_NAME,
             db=DB_NAME,
-            charset="utf8"
+            charset="utf8",
+            connection_timeout=3
         )
+        
+    
+    def _reconnect(self):
+        self.connection.reconnect(attempts=3, delay=5)
+        
+    
+    @contextmanager
+    def _connection(self):
         try:
-            yield connection
+            yield self.connection
+        except errors.OperationalError as e:
+            if e.errno == errorcode.CR_SERVER_LOST:
+                self._reconnect()
+                yield self.connection
         except:
-            connection.rollback()
+            self.connection.rollback()
             raise
         else:
-            connection.commit()
-        finally:
-            connection.close()
+            self.connection.commit()
+    
+    
+    @contextmanager
+    def _connection_without_halt(self):
+        try:
+            yield self.connection
+        except errors.OperationalError as e:
+            if e.errno == errorcode.CR_SERVER_LOST:
+                self._reconnect()
+                yield self.connection
+        except:
+            self.connection.rollback()
+        else:
+            self.connection.commit()
     
     
     @contextmanager
@@ -44,7 +79,26 @@ class MovieBookingAgent:
                 yield cursor
             finally:
                 cursor.close()
+                
+                
+    @contextmanager
+    def _optional_cursor(self, cursor=None):
+        if cursor is None:
+            with self._cursor() as new_cursor:
+                yield new_cursor
+        else:
+            yield cursor
+                
+                
+    def terminate(self):
+        self.connection.close()
+        
+        
 
+class MovieBookingAgent(SQLConnector):
+    def __init__(self):
+        super().__init__()
+    
 
     # Problem 1 (5 pt.)
     def initialize_database(self, only_create_tables=False):
@@ -59,38 +113,30 @@ class MovieBookingAgent:
                 cursor.execute("SHOW TABLES")
                 all_tables = cursor.fetchall()
                 return all_tables  # for debugging
-            
+
         with open(DEFAULT_DATA) as csvfile:
             reader = csv.DictReader(csvfile)
             for i, row in enumerate(reader):
-                # TODO: check all constraints and then perform all insertions -> rollback이 있어서 안전?
-                title, director, price = row["title"], row["director"], int(row["price"])
-                name, age, class_ = row["name"], int(row["age"]), row["class"]
-                try:
-                    self.insert_movie(title, director, price)
-                except MovieTitleAlreadyExistsError:
-                    pass
-                except MoviePriceError:  # ignore record
-                    continue
-                try:
-                    self.insert_user(name, age, class_)
-                except UserAlreadyExistsError:
-                    pass
-                except (UserAgeError, UserClassError):  # ignore record
-                    continue
-                
-                with self._cursor() as cursor:
+                with self._connection_without_halt() as connection:
+                    cursor = connection.cursor(buffered=True)
+                    title, director, price = row["title"], row["director"], int(row["price"])
+                    name, age, class_ = row["name"], int(row["age"]), row["class"]
+                    try:
+                        self.insert_movie(title, director, price, cursor)
+                    except MovieTitleAlreadyExistsError:  # note that each record is a reservation
+                        pass
+                    try:
+                        self.insert_user(name, age, class_, cursor)
+                    except UserAlreadyExistsError:
+                        pass
+                    
                     # ID may not be equal to the lastrowid because of the duplicate entries
                     cursor.execute(select_id_from_movie, (title,))
                     movie_id = cursor.fetchone()[0]
                     cursor.execute(select_id_from_user, (name, age))
                     user_id = cursor.fetchone()[0]
-                
-                try:
-                    self.book_movie(movie_id, user_id, price, class_)
-                except:
-                    continue
                     
+                    self.book_movie(movie_id, user_id, price, class_, cursor)
                 
         return DatabaseInitializeSuccess()
     
@@ -127,8 +173,8 @@ class MovieBookingAgent:
 
 
     # Problem 4 (4 pt.)
-    def insert_movie(self, title, director, price):
-        with self._cursor() as cursor:
+    def insert_movie(self, title, director, price, cursor=None):
+        with self._optional_cursor(cursor) as cursor:
             try:
                 cursor.execute(insert_into_movie, (title, director, price))
             except Error as err:
@@ -151,8 +197,8 @@ class MovieBookingAgent:
 
 
     # Problem 5 (4 pt.)
-    def insert_user(self, name, age, class_):
-        with self._cursor() as cursor:
+    def insert_user(self, name, age, class_, cursor=None):
+        with self._optional_cursor(cursor) as cursor:
             try:
                 cursor.execute(insert_into_user, (name, age, class_))
             except Error as err:
@@ -177,8 +223,8 @@ class MovieBookingAgent:
 
 
     # Problem 8 (5 pt.)
-    def book_movie(self, movie_id, user_id, price=None, class_=None):
-        with self._cursor() as cursor:
+    def book_movie(self, movie_id, user_id, price=None, class_=None, cursor=None):
+        with self._optional_cursor(cursor) as cursor:
             cursor.execute(count_num_reservations, (movie_id,))
             num_reservations = cursor.fetchall()
             if num_reservations and num_reservations[0][0] == 10:
@@ -219,21 +265,23 @@ class MovieBookingAgent:
     # Problem 9 (5 pt.)
     def rate_movie(self, movie_id, user_id, rating):
         with self._cursor() as cursor:
+            cursor.execute(check_movie_id, (movie_id,))
+            movie_exists = cursor.fetchone()
+            if not movie_exists:
+                raise MovieNotExistError(movie_id)
+            
+            cursor.execute(check_user_id, (user_id,))
+            user_exists = cursor.fetchone()
+            if not user_exists:
+                raise UserNotExistError(user_id)
+            
             try:
                 cursor.execute(insert_into_rating, (movie_id, user_id, rating))
-                # cursor.execute("SELECT * FROM rating;")
-                # print(format_select_output(["movie_id", "user_id", "rating"], cursor.fetchall()))
             except Error as err:
-                # print(str(err))
-                if err.errno == errorcode.ER_DUP_ENTRY:
+                if err.errno in (errorcode.ER_NO_REFERENCED_ROW, errorcode.ER_NO_REFERENCED_ROW_2):
+                    raise UserNotBookedError(user_id, movie_id)
+                elif err.errno == errorcode.ER_DUP_ENTRY:
                     raise UserAlreadyRatedError(user_id, movie_id)
-                elif err.errno in (errorcode.ER_NO_REFERENCED_ROW, errorcode.ER_NO_REFERENCED_ROW_2):
-                    if "`movie`" in str(err):
-                        raise MovieNotExistError(movie_id)
-                    elif "`user`" in str(err):
-                        raise UserNotExistError(user_id)
-                    elif "`reservation`" in str(err):
-                        raise UserNotBookedError(user_id, movie_id)
                 elif err.errno == errorcode.ER_CHECK_CONSTRAINT_VIOLATED:
                     raise RatingError()
             
@@ -245,7 +293,8 @@ class MovieBookingAgent:
         headers = ["id", "name", "age", "res. price", "rating"]
         with self._cursor() as cursor:
             cursor.execute(check_movie_id, (movie_id,))
-            if len(cursor.fetchall()) == 0:
+            movie_exists = cursor.fetchone()
+            if not movie_exists:
                 raise MovieNotExistError(movie_id)
             
             cursor.execute(select_users_for_movie, (movie_id,))
@@ -259,7 +308,8 @@ class MovieBookingAgent:
         headers = ["id", "title", "director", "res. price", "rating"]
         with self._cursor() as cursor:
             cursor.execute(check_user_id, (user_id,))
-            if len(cursor.fetchall()) == 0:
+            user_exists = cursor.fetchone()
+            if not user_exists:
                 raise UserNotExistError(user_id)
             
             cursor.execute(select_movies_for_user, (user_id,))
@@ -275,22 +325,22 @@ class MovieBookingAgent:
         
         with self._cursor() as cursor:
             cursor.execute(check_user_id, (user_id,))
-            if len(cursor.fetchall()) == 0:
+            user_exists = cursor.fetchone()
+            if not user_exists:
                 raise UserNotExistError(user_id)
             
             cursor.execute(select_class_from_user, (user_id,))
             user_class = cursor.fetchone()[0]
             
-            # cursor.execute(select_unseen, (user_id,))
-            print("Unseen movies:")
-            print(cursor.fetchall())
             cursor.execute(select_highest_rating_movie, (user_id,))
-            highest_rating_record = self._replace_reservation_price(cursor.fetchone(), user_class)
-            output += format_select_output(headers, [highest_rating_record], title="Rating-based")
+            result1 = cursor.fetchone()
+            highest_rating_record = [self._replace_reservation_price(result1, user_class)] if result1 else []
+            output += format_select_output(headers, highest_rating_record, title="Rating-based")
             output += "\n"
             cursor.execute(select_most_popular_movie, (user_id,))
-            most_popular_record = self._replace_reservation_price(cursor.fetchone(), user_class)
-            output += format_select_output(headers, [most_popular_record], title="Popularity-based")
+            result2 = cursor.fetchone()
+            most_popular_record = [self._replace_reservation_price(result2, user_class)] if result2 else []
+            output += format_select_output(headers, most_popular_record, title="Popularity-based")
         
         return output
     
@@ -307,7 +357,8 @@ class MovieBookingAgent:
         
         with self._cursor() as cursor:
             cursor.execute(check_user_id, (user_id,))
-            if len(cursor.fetchall()) == 0:
+            user_exists = cursor.fetchone()
+            if not user_exists:
                 raise UserNotExistError(user_id)
             
             cursor.execute(select_all_from_user)
@@ -318,9 +369,6 @@ class MovieBookingAgent:
             cursor.execute(select_user_movie_rating_triples)
             user_movie_ratings = cursor.fetchall()
             
-            # cursor.execute("SELECT * FROM rating;")
-            # print(format_select_output(["movie_id", "user_id", "rating"], cursor.fetchall()))
-        
         matrix = np.zeros((len(user_ids), len(movie_ids)))
         user_has_ratings = False
         for user_id_, movie_id, rating in user_movie_ratings:
@@ -328,7 +376,6 @@ class MovieBookingAgent:
             user_idx = user_ids.index(user_id_)
             movie_idx = movie_ids.index(movie_id)
             matrix[user_idx, movie_idx] = rating
-            
         if not user_has_ratings:
             raise RatingNotExistError()
         
@@ -351,25 +398,23 @@ class MovieBookingAgent:
             similarity_weights = np.delete(similarity_weights, movie_idx)
             estimated_rating = np.round(np.sum(user_ratings * similarity_weights) / np.sum(similarity_weights), 4)
             return movie_id, estimated_rating
-            
+        
+        # Compute estimated ratings for movies that the user has not rated
         not_rated_indices = np.where(matrix[user_idx] == 0)[0]
-        estimated_ratings = list(map(weighted_average, not_rated_indices))
-        # print("Estimated ratings:", estimated_ratings)
-        estimated_ratings_dict = dict(sorted(estimated_ratings, key=lambda x: (x[1], x[0]), reverse=True))  # (movie_id, estimated_rating)
-        # print("Top k movie rating:", estimated_ratings_dict)
-        candidate_movies = ', '.join(list(map(str, estimated_ratings_dict.keys())))
+        estimated_ratings_dict = dict(map(weighted_average, not_rated_indices))  # movie_id: estimated_rating
+        placeholders = ', '.join(['%s'] * len(estimated_ratings_dict))
         
         with self._cursor() as cursor:
             cursor.execute(select_class_from_user, (user_id,))
             user_class = cursor.fetchone()[0]
-            cursor.execute(select_movie_recommend_info, {"movies": candidate_movies, "user_id": user_id, "top_k": k})
+            cursor.execute(select_movie_recommend_info.format(placeholders=placeholders), tuple(estimated_ratings_dict.keys()) + (user_id,))  # candidate movies that user has already seen is filtered out
             movie_records = cursor.fetchall()
-            # print("Movie records:", movie_records)
-        final_records = []
+        movie_with_estimated_rating_records = []
         for record in movie_records:
             record = self._replace_reservation_price(record, user_class)
             record += (estimated_ratings_dict[record[0]],)  # append estimated rating (record[0] is movie_id)
-            final_records.append(record)
-        final_records = sorted(final_records, key=lambda x: (-x[4], x[0]))  # first sort by estimated rating, then by movie_id
+            movie_with_estimated_rating_records.append(record)
+        # Sort by estimated rating, then by movie_id, and select top k
+        top_k_records = sorted(movie_with_estimated_rating_records, key=lambda x: (-x[4], x[0]))[:k]
         
-        return format_select_output(headers, final_records)
+        return format_select_output(headers, top_k_records)

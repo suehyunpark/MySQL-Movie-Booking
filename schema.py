@@ -42,11 +42,7 @@ TABLES["rating"] = """\
         user_id INT NOT NULL,
         rating INT,
         PRIMARY KEY (movie_id, user_id),
-        FOREIGN KEY (movie_id) REFERENCES movie(movie_id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES user(user_id) ON DELETE CASCADE,
         FOREIGN KEY (movie_id, user_id) REFERENCES reservation(movie_id, user_id) ON DELETE CASCADE,
         CHECK (rating >= 1 AND rating <= 5)
         );
     """
-
-DEFAULT_DATA = "data.csv"

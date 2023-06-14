@@ -11,7 +11,8 @@ def main():
     agent = MovieBookingAgent()
     
     if SUBMISSION:
-        created_tables = agent.reset(only_create_tables=True)
+        confirmation = input("Are you sure to reset the database? (y/n): ")
+        created_tables = agent.reset(confirmation, only_create_tables=True)
         print("Created tables:", created_tables)
         return
     
@@ -100,22 +101,16 @@ def main():
                 result = agent.reset(confirmation)
             else:
                 raise InvalidActionError()
-        except (
-                MovieTitleAlreadyExistsError, UserAlreadyExistsError,
-                MovieNotExistError, UserNotExistError, 
-                UserAgeError, UserClassError, MoviePriceError,
-                MovieAlreadyBookedError, MovieFullyBookedError, UserNotBookedError, 
-                UserAlreadyRatedError, RatingNotExistError, RatingError,
-                InvalidActionError
-            ) as e:
+        except (CustomBaseException, InvalidActionError) as e:
             print(e)
-        except:
-            print(traceback.format_exc())
-            break
+        # except:
+        #     print(traceback.format_exc())
+        #     break
         else:
             if result:
                 print(result)
     
+    agent.terminate()
 
 if __name__ == "__main__":
     main()

@@ -36,7 +36,6 @@ select_all_from_user = """\
     ORDER BY user_id;
     """
 
-# multiple commands
 drop_all_tables = """\
     DROP TABLE IF EXISTS rating, reservation, user, movie;
     """
@@ -107,13 +106,13 @@ select_movies_for_user = """\
     """
     
 check_movie_id = """\
-    SELECT *
+    SELECT 1
     FROM movie
     WHERE movie_id = %s;
     """
     
 check_user_id = """\
-    SELECT *
+    SELECT 1
     FROM user
     WHERE user_id = %s;
     """
@@ -131,9 +130,17 @@ select_unseen = """\
     GROUP BY movie_id
     """
 
+
+
+count_num_ratings = """\
+    SELECT SUM(rating)
+    FROM rating;
+    """
+    
+
 select_highest_rating_movie = """\
     WITH unseen AS (
-        SELECT movie.movie_id, title, price, COUNT(DISTINCT reservation.user_id) as num_reservations, AVG(rating) as avg_rating
+        SELECT movie.movie_id, title, price, COUNT(DISTINCT reservation.user_id) as num_reservations, COALESCE(AVG(rating), 0) as avg_rating
         FROM movie
         JOIN reservation USING (movie_id)
         LEFT OUTER JOIN rating USING (movie_id)
@@ -197,18 +204,17 @@ select_user_movie_rating_triples = """\
         HAVING SUM(rating) > 0
     );
     """
+
     
 select_movie_recommend_info = """\
     SELECT movie_id, title, price, AVG(rating) as avg_rating
     FROM movie
     LEFT OUTER JOIN rating USING (movie_id)
-    WHERE movie_id IN (%(movies)s) 
+    WHERE movie_id IN ({placeholders}) 
         AND movie_id NOT IN (
             SELECT movie_id 
             FROM reservation 
-            WHERE user_id = %(user_id)s
+            WHERE user_id = %s
         )
-    GROUP BY movie_id
-    ORDER BY movie_id
-    LIMIT %(top_k)s;
+    GROUP BY movie_id;
     """
