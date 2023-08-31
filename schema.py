@@ -1,4 +1,4 @@
-DB_NAME = "DB2018_17119"
+DB_NAME = "DB"  # personal information
 
 TABLES = {}
 TABLES["movie"] = """\
