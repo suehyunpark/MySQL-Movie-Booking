@@ -89,4 +89,4 @@ Recommend Count: 1
 Note that while reading `data.csv`, if there are duplicate movie titles with different directors or prices, or duplicate customer names with different ages or classes, the application will assume these as valid and unique entries.
 
 ---
-This project was done as part of Database M1522.001800, Spring 2023 course.
+This project was done as part of Spring 2023 Database M1522.001800 course of Seoul National University.
